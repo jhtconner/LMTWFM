@@ -26,6 +26,7 @@ from utils import SSIM
 from thop import profile
 from sklearn.model_selection import train_test_split
 
+
 class NoamOpt:
     def __init__(self, model_size, factor, warmup, optimizer):
         self.optimizer = optimizer
@@ -66,17 +67,17 @@ class Trainer:
             idx = 0
         if idx == 'v':
             idx = 1
-            
+
         rmse = torch.mean((y_pred[:, :, idx] - y_true[:, :, idx])**2, dim=[2, 3])
         rmse = torch.mean(torch.sqrt(rmse.mean(dim=0)))
-            
+
         return rmse
-    
+
     def SSIM_loss(self, pred, true):
         pred_np = pred[:,:,:2].permute(1,0,2,3,4)
         true_np = true[:,:,:2].permute(1,0,2,3,4)
         total_loss = 0.0
- 
+
         for i in range(pred_np.shape[0]):
                   loss = 1 - SSIM.SSIM(pred_np[i], true_np[i])
                   total_loss += loss.item()
@@ -87,7 +88,7 @@ class Trainer:
     def Angle_loss(self, batch_y, pred_y):
         true = self.Angle_wind(batch_y)
         pred = self.Angle_wind(pred_y)
-        
+
         diff = torch.abs(true - pred)
         diff = torch.where(diff > 180, 360 - diff, diff)
 
@@ -96,7 +97,7 @@ class Trainer:
         mse = torch.mean(diff_normalized ** 2)
         rmse = torch.sqrt(mse)
         return rmse
-    
+
     def Angle_wind(self, batch_y):
         true = torch.tensor(batch_y, dtype=torch.float)
         a_fushu = true[:, :, 0, :, :]
@@ -106,43 +107,43 @@ class Trainer:
         angle_deg = angle_rad * (180 / 3.141592653589793)
         angle_metric = angle_deg.unsqueeze(2)
         return angle_metric
-    
+
     def train_once(self, input_uv, uv_true, ssr_ratio, ele):
         uv_pred = self.network(input_uv.float().to(self.device), ele.float().to(self.device))
         self.opt.optimizer.zero_grad()
         loss_u = self.loss(uv_pred, uv_true.float().to(self.device), self.u)
-        loss_v = self.loss(uv_pred, uv_true.float().to(self.device), self.v)        
+        loss_v = self.loss(uv_pred, uv_true.float().to(self.device), self.v)
 
-        loss_ssim = self.SSIM_loss(uv_pred, uv_true.float().to(self.device))   
+        loss_ssim = self.SSIM_loss(uv_pred, uv_true.float().to(self.device))
         loss_angle = self.Angle_loss(uv_true.float().to(self.device), uv_pred)
 
         loss = loss_u + loss_v + loss_ssim + loss_angle
- 
+
         loss.backward()
         if configs.gradient_clipping:
             nn.utils.clip_grad_norm_(self.network.parameters(), configs.clipping_threshold)
         self.opt.step()
-        
+
         return loss_u.item(), loss_v.item(), loss_ssim, loss_angle, loss
 
     def test(self, dataloader_test, ele):
         uv_pred = []
         with torch.no_grad():
-            for input_uv, uv_true in dataloader_test:    
+            for input_uv, uv_true in dataloader_test:
                 uv = self.network(input_uv.float().to(self.device), ele.float().to(self.device))
                 uv_pred.append(uv)
 
         return torch.cat(uv_pred, dim=0)
-    
+
     def infer(self, dataset, dataloader, ele):
         self.network.eval()
         with torch.no_grad():
             uv_pred = self.test(dataloader, ele)
             uv_true = torch.from_numpy(dataset.target).float().to(self.device)
-            
+
             loss_u = self.loss(uv_pred, uv_true, self.u).item()
             loss_v = self.loss(uv_pred, uv_true, self.v).item()
-  
+
         return loss_u, loss_v
 
     def train(self, dataset_train, dataset_eval, elev, chk_path):
@@ -152,7 +153,7 @@ class Trainer:
         print('loading eval dataloader')
         dataloader_eval = DataLoader(dataset_eval, batch_size=self.configs.batch_size_test, shuffle=False)
         elev = torch.tensor(elev)
-          
+
         count = 0
         best = 100
         ssr_ratio = 1
@@ -163,17 +164,17 @@ class Trainer:
             for j, (input_uv, uv_true) in enumerate(dataloader_train):
                 if ssr_ratio > 0:
                     ssr_ratio = max(ssr_ratio - self.configs.ssr_decay_rate, 0)
-                    
+
                 loss_u, loss_v,  loss_ssim, loss_angle, loss = self.train_once(input_uv, uv_true, ssr_ratio, elev)
-   
+
                 if (j+1) % self.configs.display_interval == 0:
                     print('batch training loss: {:.4f}, {:.4f}, {:.4f}, {:.4f}, {:.4f}, ssr: {:.5f}, lr: {:.5f}'.format(loss_u, loss_v, loss_ssim, loss_angle, loss, ssr_ratio, self.opt.rate()))
-              
+
                 if (i+1 >= 10) and (j+1)%(self.configs.display_interval * 2) == 0:
                     loss_u_eval_0, loss_v_eval_0 = self.infer(dataset=dataset_eval, dataloader=dataloader_eval, ele=elev)
                     loss_eval_0 = loss_u_eval_0 + loss_v_eval_0
                     print('batch eval loss: {:.4f}, {:.4f}, {:.4f}'.format(loss_u_eval_0, loss_v_eval_0, loss_eval_0))
-                
+
                     if loss_eval_0 < best:
                         self.save_model(chk_path)
                         best = loss_eval_0
@@ -184,8 +185,8 @@ class Trainer:
             loss_u_eval, loss_v_eval = self.infer(dataset=dataset_eval, dataloader=dataloader_eval, ele=elev)
             loss_eval = loss_u_eval + loss_v_eval
             print('epoch eval loss: {:.4f}, {:.4f}, {:.4f}'.format(loss_u_eval, loss_v_eval, loss_eval))
-            
-            
+
+
             if loss_eval >= best:
                 count += 1
                 print('eval loss is not reduced for {} epoch'.format(count))
@@ -250,36 +251,47 @@ class dataset_package(Dataset):
 if __name__ == '__main__':
     print('Configs:\n', configs.__dict__)
 
-    uv_train = np.load("data/Northeast/uv100_train.npy").astype(np.float32)
-    zt_train = np.load("data/Northeast/1000zt_train.npy").astype(np.float32)
-    
-    uv_train = np.concatenate((uv_train, zt_train), axis=1)
+    # Load England data (already windowed, so no data_process needed)
+    uv_train = np.load("mfwpn_data_england/npy_files/train_wind.npy").astype(np.float32)
+    zt_train = np.load("mfwpn_data_england/npy_files/train_pressure.npy").astype(np.float32)
+
+    print(f'Wind shape: {uv_train.shape}')
+    print(f'Pressure shape: {zt_train.shape}')
+
+    # Concatenate along channel dimension (axis=2)
+    # Wind: (samples, 48, 2, H, W)
+    # Pressure: (samples, 48, 2, H, W)
+    # Result: (samples, 48, 4, H, W)
+    uv_train = np.concatenate((uv_train, zt_train), axis=2)
+    print(f'Combined shape: {uv_train.shape}')
     del zt_train
-    
-    ele = np.load('data/Northeast/DEM_northeast.npy').astype(np.float32)
 
+    # Load and process elevation
+    ele = np.load('mfwpn_data_england/npy_files/elevation.npy').astype(np.float32)
     ele[ele < 0] = 0
-    ele= (ele - ele.mean()) / ele.std()
+    ele = (ele - ele.mean()) / ele.std()
 
-    print('processing training set')
-    dataset_train = data_process(uv_train, samples_gap=3)
+    # Data is already windowed (samples, 48, 4, H, W)
+    # Split into input (first 24h) and target (last 24h)
+    print('Splitting into input/target')
+    train_x = uv_train[:, :24, :, :, :]  # First 24 hours
+    train_y = uv_train[:, 24:, :, :, :]  # Last 24 hours
     del uv_train
 
-    train_x = dataset_train[:, :24, :, :, :]
-    train_y = dataset_train[:, 24:, :, :, :]
-    
+    print(f'Input shape: {train_x.shape}')
+    print(f'Target shape: {train_y.shape}')
+
+    # Create dataset and split into train/val
     dataset_train = dataset_package(train_x=train_x, train_y=train_y)
     del train_x, train_y
-    
+
     dataset_train, dataset_val = dataset_train.split_data()
-    
+
     print('Dataset_train Shape:\n', dataset_train.GetDataShape())
     print('Dataset_val Shape:\n', dataset_val.GetDataShape())
-    
+
+    # Train
     trainer = Trainer(configs)
     trainer.save_configs('config_train.pkl')
-    
-    trainer.train(dataset_train, dataset_val, ele, 'chkfile/checkpoint_mfwpn.chk')
 
-
-
+    trainer.train(dataset_train, dataset_val, ele, 'chkfile/checkpoint_mfwpn_england.chk')
