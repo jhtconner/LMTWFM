@@ -2,7 +2,6 @@ dask
 einops==0.7.0
 h5py==3.9.0
 matplotlib==3.4.3
-minepy==1.2.6
 netCDF4==1.6.4
 numpy
 opencv-python==4.7.0.72
@@ -13,9 +12,9 @@ scikit-image==0.19.3
 scikit-learn==1.2.2
 scipy==1.10.1
 seaborn==0.13.2
-thop==0.1.1
+thop==0.1.1.post2209072238
 timm==0.6.11
-torch==1.9.0
-torchvision==0.10.0
+torch==2.1.1
+torchvision==0.16.1
 tqdm
 xarray==0.19.0

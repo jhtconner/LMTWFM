@@ -1,0 +1,10 @@
+.idea
+.venv
+.venv1
+
+
+chkfile/
+mfwpn_data_england/
+data/
+
+*.npy

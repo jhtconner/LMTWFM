@@ -99,12 +99,14 @@ class Trainer:
         return rmse
 
     def Angle_wind(self, batch_y):
-        true = torch.tensor(batch_y, dtype=torch.float)
-        a_fushu = true[:, :, 0, :, :]
-        b_fushu = true[:, :, 1, :, :]
-        complex_tensor = a_fushu + 1j * b_fushu
-        angle_rad = torch.angle(complex_tensor)
-        angle_deg = angle_rad * (180 / 3.141592653589793)
+        true = torch.tensor(batch_y, dtype=torch.float, device=self.device)
+        a = true[:, :, 0, :, :]
+        b = true[:, :, 1, :, :]
+
+        # angle in radians using atan2
+        angle_rad = torch.atan2(b, a)
+        angle_deg = angle_rad * (180 / np.pi)
+
         angle_metric = angle_deg.unsqueeze(2)
         return angle_metric
 
