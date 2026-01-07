@@ -9,7 +9,7 @@ class Configs:
 configs = Configs()
 
 configs.n_cpu = 0
-configs.device = torch.device('cuda:0')
+configs.device = torch.device('mps')
 configs.batch_size_test = 4
 configs.batch_size = 4
 configs.weight_decay = 0

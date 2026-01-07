@@ -256,3 +256,41 @@ class MixMlp(nn.Module):
         x = self.fc2(x)
         x = self.drop(x)
         return x
+
+class VariableFusion(nn.Module):
+    """
+    ClimODE-style learned fusion for multivariate feature maps.
+    Learns dynamic importance weights per variable.
+    """
+
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+
+        hidden = max(1, channels // reduction)
+
+        self.score_net = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, hidden, kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, 1, kernel_size=1, bias=False)
+        )
+
+    def forward(self, features):
+        """
+        Args:
+            features: list of tensors [B, C, H, W]
+        Returns:
+            fused: [B, C, H, W]
+            weights: [B, V, 1, 1, 1]
+        """
+        # Stack variables → [B, V, C, H, W]
+        stack = torch.stack(features, dim=1)
+
+        # Compute importance scores
+        scores = [self.score_net(f) for f in features]   # [B,1,1,1]
+        scores = torch.stack(scores, dim=1)              # [B,V,1,1,1]
+
+        weights = torch.softmax(scores, dim=1)
+        fused = (stack * weights).sum(dim=1)
+
+        return fused, weights

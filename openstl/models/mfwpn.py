@@ -5,7 +5,7 @@ import numpy as np
 import copy
 import numbers
 from einops import rearrange
-from openstl.modules import (ConvSC, GASubBlock)
+from openstl.modules import (ConvSC, GASubBlock, VariableFusion)
 
 
 class MFWPN_Model(nn.Module):
@@ -28,7 +28,9 @@ class MFWPN_Model(nn.Module):
         self.ele_conv = nn.Sequential(
             nn.Conv2d(48, 48, kernel_size=3, stride=1, padding=1),
             nn.Conv2d(48, 48, kernel_size=1, stride=1))
-          
+
+        self.var_fusion = VariableFusion(channels=2)
+
     def forward(self, x_raw, ele, **kwargs):
         B, T, C, H, W = x_raw.shape
         
@@ -122,7 +124,8 @@ class Encoder(nn.Module):
         self.ele_conv = nn.Sequential(
             nn.Conv2d(1, 2, kernel_size=3, stride=1, padding=1),
             nn.Conv2d(2, 2, kernel_size=1, stride=1))
-        
+        self.var_fusion = VariableFusion(channels=2)
+
     def forward(self, x, ele):
         w = x[:, 0:2]
         tz = x[:, 2:4]
@@ -135,10 +138,17 @@ class Encoder(nn.Module):
         tzse_x = self.tzse(tz)
         tzcs = tzse_x * self.tzscale[0] + tzce_x * self.tzscale[1]
         ####Fusion module
-        tz_gate_2 = self.gate_2(tzcs)
-        wcs = wcs * self.sa_f(tzcs) + self.sa_i(tzcs) * self.gate_2(tzcs) + wcs * self.gate_1(self.ele_conv(ele))
+        # ClimODE-style learned multivariate fusion
+        fused_w, fusion_weights = self.var_fusion([wcs, tzcs])
 
-        return wcs, tzcs
+        assert fused_w.shape == wcs.shape, \
+            f"Fusion shape mismatch: {fused_w.shape} vs {wcs.shape}"
+
+        # Elevation modulation (kept)
+        fused_w = fused_w + wcs * self.gate_1(self.ele_conv(ele))
+
+        return fused_w, tzcs
+
 
 class Decoder(nn.Module):
     """3D Encoder for SimVP"""
