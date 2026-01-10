@@ -121,37 +121,60 @@ class dataset_package(Dataset):
 
 ########################################################################################################################
 
+
 if __name__ == '__main__':
     print('Configs:\n', configs.__dict__)
-    
-    uv_test   = np.load("data/Northeast/uv100_test.npy").astype(np.float32)
-    zt_test  = np.load("data/Northeast/1000zt_test.npy").astype(np.float32)
-    uv_test   = np.concatenate((uv_test, zt_test), axis=1)
+
+    # Load England test data (already windowed)
+    print('\nLoading England test data...')
+    uv_test = np.load("mfwpn_data_england/npy_files/test_wind.npy").astype(np.float32)
+    zt_test = np.load("mfwpn_data_england/npy_files/test_pressure.npy").astype(np.float32)
+
+    print(f'Wind shape: {uv_test.shape}')
+    print(f'Pressure shape: {zt_test.shape}')
+
+    # Concatenate along channel dimension (axis=2)
+    uv_test = np.concatenate((uv_test, zt_test), axis=2)
+    print(f'Combined shape: {uv_test.shape}')
     del zt_test
-    
-    ele = np.load('data/Northeast/DEM_northeast.npy')
 
+    # Load elevation
+    ele = np.load('mfwpn_data_england/npy_files/elevation.npy').astype(np.float32)
     ele[ele < 0] = 0
-    ele= (ele - ele.mean()) / ele.std()
+    ele = (ele - ele.mean()) / ele.std()
 
-    print('processing test set')
-    dataset_test = data_process(uv_test, samples_gap=6)
+    # Data is already windowed, just split into input/target
+    print('\nSplitting into input/target...')
+    test_x = uv_test[:, :24, :, :, :]  # First 24 hours
+    test_y = uv_test[:, 24:, :, :, :]  # Last 24 hours
     del uv_test
-
-    test_x = dataset_test[:, :24, :, :, :]
-    test_y = dataset_test[:, 24:, :, :, :]
 
     dataset_test = dataset_package(train_x=test_x, train_y=test_y)
     del test_x, test_y
     print('Dataset_test Shape:\n', dataset_test.GetDataShape())
 
+    # Load trained model
     trainer = Trainer(configs)
-    net = torch.load('chkfile/checkpoint_mfwpn.chk')
+    checkpoint_path = 'chkfile/checkpoint_mfwpn_england.chk'
+
+    if not os.path.exists(checkpoint_path):
+        print(f'\nERROR: Checkpoint not found at {checkpoint_path}')
+        print('Available checkpoints:')
+        if os.path.exists('chkfile'):
+            for f in os.listdir('chkfile'):
+                print(f'  - chkfile/{f}')
+        exit(1)
+
+    print(f'\nLoading checkpoint from {checkpoint_path}...')
+    net = torch.load(checkpoint_path, map_location=configs.device)
     trainer.network.load_state_dict(net['net'])
-    
+    print('Model loaded successfully')
+
+    # Run inference
     elev = torch.tensor(ele)
-    data = DataLoader(dataset_test, batch_size=1, shuffle=False)
-    loss_u_test_0, loss_v_test_0 = trainer.infer(dataset=dataset_test, dataloader=data, ele=elev)
-    
-    loss_test_0 = loss_u_test_0 + loss_v_test_0
-    print('test loss: {:.4f}, {:.4f}, {:.4f}'.format(loss_u_test_0, loss_v_test_0, loss_test_0))
+    data = DataLoader(dataset_test, batch_size=configs.batch_size_test, shuffle=False)
+
+    print('\nRunning inference on test set...')
+    loss_u_test, loss_v_test = trainer.infer(dataset=dataset_test, dataloader=data, ele=elev)
+
+    loss_test = loss_u_test + loss_v_test
