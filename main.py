@@ -56,7 +56,7 @@ class Trainer:
         self.configs = configs
         self.device = configs.device
         torch.manual_seed(35)
-        self.network = MFWPN_Model().to(configs.device)
+        self.network = MFWPN_Model(input_hours=24, forecast_hours=72).to(configs.device)
         adam = torch.optim.Adam([{'params': self.network.parameters()}], lr=0, weight_decay=configs.weight_decay)
         factor = math.sqrt(configs.d_model*configs.warmup)*0.001
         self.opt = NoamOpt(configs.d_model, factor, warmup=configs.warmup, optimizer=adam)
@@ -211,88 +211,73 @@ class Trainer:
         torch.save({'net': self.network.state_dict(),
                     'optimizer': self.opt.optimizer.state_dict()}, path)
 
+
 class dataset_package(Dataset):
-    def __init__(self, train_x, train_y):
+    def __init__(self, wind_path, pressure_path, indices=None):
         super().__init__()
-        self.input = train_x
-        self.target = train_y
+        self.wind = np.load(wind_path, mmap_mode='r')
+        self.pressure = np.load(pressure_path, mmap_mode='r')
+        self.indices = indices if indices is not None else np.arange(len(self.wind))
 
     def GetDataShape(self):
-        return {'input': self.input.shape,
-                'target': self.target.shape}
+        sample_input, sample_target = self[0]
+        return {'input': (len(self),) + sample_input.shape,
+                'target': (len(self),) + sample_target.shape}
 
-    def __len__(self, ):
-        return self.input.shape[0]
+    def __len__(self):
+        return len(self.indices)
 
     def __getitem__(self, idx):
-        return self.input[idx], self.target[idx]
+        real_idx = self.indices[idx]
+        wind = self.wind[real_idx].astype(np.float32)
+        pressure = self.pressure[real_idx].astype(np.float32)
+        combined = np.concatenate([wind, pressure], axis=1)
+        input_data = combined[:24]
+        target_data = combined[24:96]
+        return input_data, target_data
 
     def split_data(self, test_size=0.1, random_state=35):
-        """
-        Split the data into training and testing sets.
-
-        Args:
-            test_size (float): Proportion of the dataset to include in the test split (default is 0.2).
-            random_state (int or None): Random seed for reproducibility (default is None).
-
-        Returns:
-            (train_dataset, test_dataset): Tuple of Dataset objects for training and testing.
-        """
-        # Use sklearn's train_test_split to randomly split the data
-        X_train, X_test, y_train, y_test = train_test_split(
-            self.input, self.target, test_size=test_size, random_state=random_state
+        train_idx, val_idx = train_test_split(
+            self.indices, test_size=test_size, random_state=random_state
         )
+        train_dataset = type(self).__new__(type(self))
+        train_dataset.wind = self.wind
+        train_dataset.pressure = self.pressure
+        train_dataset.indices = train_idx
 
-        # Create new datasets for train and test
-        train_dataset = dataset_package(X_train, y_train)
-        test_dataset = dataset_package(X_test, y_test)
+        val_dataset = type(self).__new__(type(self))
+        val_dataset.wind = self.wind
+        val_dataset.pressure = self.pressure
+        val_dataset.indices = val_idx
 
-        return train_dataset, test_dataset
-########################################################################################################################
+        return train_dataset, val_dataset
+
+    @property
+    def target(self):
+        targets = []
+        for i in range(len(self)):
+            _, target = self[i]
+            targets.append(target)
+        return np.array(targets)
+
 
 if __name__ == '__main__':
     print('Configs:\n', configs.__dict__)
 
-    # Load England data (already windowed, so no data_process needed)
-    uv_train = np.load("mfwpn_data_england/npy_files/train_wind.npy").astype(np.float32)
-    zt_train = np.load("mfwpn_data_england/npy_files/train_pressure.npy").astype(np.float32)
-
-    print(f'Wind shape: {uv_train.shape}')
-    print(f'Pressure shape: {zt_train.shape}')
-
-    # Concatenate along channel dimension (axis=2)
-    # Wind: (samples, 48, 2, H, W)
-    # Pressure: (samples, 48, 2, H, W)
-    # Result: (samples, 48, 4, H, W)
-    uv_train = np.concatenate((uv_train, zt_train), axis=2)
-    print(f'Combined shape: {uv_train.shape}')
-    del zt_train
-
-    # Load and process elevation
-    ele = np.load('mfwpn_data_england/npy_files/elevation.npy').astype(np.float32)
-    ele[ele < 0] = 0
-    ele = (ele - ele.mean()) / ele.std()
-
-    # Data is already windowed (samples, 48, 4, H, W)
-    # Split into input (first 24h) and target (last 24h)
-    print('Splitting into input/target')
-    train_x = uv_train[:, :24, :, :, :]  # First 24 hours
-    train_y = uv_train[:, 24:, :, :, :]  # Last 24 hours
-    del uv_train
-
-    print(f'Input shape: {train_x.shape}')
-    print(f'Target shape: {train_y.shape}')
-
-    # Create dataset and split into train/val
-    dataset_train = dataset_package(train_x=train_x, train_y=train_y)
-    del train_x, train_y
+    dataset_train = dataset_package(
+        "mfwpn_data_england/npy_files/test_wind.npy",
+        "mfwpn_data_england/npy_files/test_pressure.npy"
+    )
 
     dataset_train, dataset_val = dataset_train.split_data()
 
     print('Dataset_train Shape:\n', dataset_train.GetDataShape())
     print('Dataset_val Shape:\n', dataset_val.GetDataShape())
 
-    # Train
+    ele = np.load('mfwpn_data_england/npy_files/elevation.npy').astype(np.float32)
+    ele[ele < 0] = 0
+    ele = (ele - ele.mean()) / ele.std()
+
     trainer = Trainer(configs)
     trainer.save_configs('config_train.pkl')
 

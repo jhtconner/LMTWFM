@@ -54,7 +54,7 @@ class Trainer:
         self.configs = configs
         self.device = configs.device
         torch.manual_seed(35)
-        self.network = MFWPN_Model().to(configs.device)
+        self.network = MFWPN_Model(input_hours=24, forecast_hours=72).to(configs.device)
         adam = torch.optim.Adam([{'params': self.network.parameters()}], lr=0, weight_decay=configs.weight_decay)
         factor = math.sqrt(configs.d_model*configs.warmup)*0.001
         self.opt = NoamOpt(configs.d_model, factor, warmup=configs.warmup, optimizer=adam)
@@ -104,20 +104,36 @@ class Trainer:
         return loss_u, loss_v
 
 class dataset_package(Dataset):
-    def __init__(self, train_x, train_y):
+    def __init__(self, wind_path, pressure_path, indices=None):
         super().__init__()
-        self.input = train_x
-        self.target = train_y
+        self.wind = np.load(wind_path, mmap_mode='r')
+        self.pressure = np.load(pressure_path, mmap_mode='r')
+        self.indices = indices if indices is not None else np.arange(len(self.wind))
 
     def GetDataShape(self):
-        return {'input': self.input.shape,
-                'target': self.target.shape}
+        sample_input, sample_target = self[0]
+        return {'input': (len(self),) + sample_input.shape,
+                'target': (len(self),) + sample_target.shape}
 
-    def __len__(self, ):
-        return self.input.shape[0]
+    def __len__(self):
+        return len(self.indices)
 
     def __getitem__(self, idx):
-        return self.input[idx], self.target[idx]
+        real_idx = self.indices[idx]
+        wind = self.wind[real_idx].astype(np.float32)
+        pressure = self.pressure[real_idx].astype(np.float32)
+        combined = np.concatenate([wind, pressure], axis=1)
+        input_data = combined[:24]
+        target_data = combined[24:96]
+        return input_data, target_data
+
+    @property
+    def target(self):
+        targets = []
+        for i in range(len(self)):
+            _, target = self[i]
+            targets.append(target)
+        return np.array(targets)
 
 ########################################################################################################################
 
@@ -125,35 +141,17 @@ class dataset_package(Dataset):
 if __name__ == '__main__':
     print('Configs:\n', configs.__dict__)
 
-    # Load England test data (already windowed)
     print('\nLoading England test data...')
-    uv_test = np.load("mfwpn_data_england/npy_files/test_wind.npy").astype(np.float32)
-    zt_test = np.load("mfwpn_data_england/npy_files/test_pressure.npy").astype(np.float32)
+    dataset_test = dataset_package(
+        "mfwpn_data_england/npy_files/test_wind.npy",
+        "mfwpn_data_england/npy_files/test_pressure.npy"
+    )
+    print('Dataset_test Shape:\n', dataset_test.GetDataShape())
 
-    print(f'Wind shape: {uv_test.shape}')
-    print(f'Pressure shape: {zt_test.shape}')
-
-    # Concatenate along channel dimension (axis=2)
-    uv_test = np.concatenate((uv_test, zt_test), axis=2)
-    print(f'Combined shape: {uv_test.shape}')
-    del zt_test
-
-    # Load elevation
     ele = np.load('mfwpn_data_england/npy_files/elevation.npy').astype(np.float32)
     ele[ele < 0] = 0
     ele = (ele - ele.mean()) / ele.std()
 
-    # Data is already windowed, just split into input/target
-    print('\nSplitting into input/target...')
-    test_x = uv_test[:, :24, :, :, :]  # First 24 hours
-    test_y = uv_test[:, 24:, :, :, :]  # Last 24 hours
-    del uv_test
-
-    dataset_test = dataset_package(train_x=test_x, train_y=test_y)
-    del test_x, test_y
-    print('Dataset_test Shape:\n', dataset_test.GetDataShape())
-
-    # Load trained model
     trainer = Trainer(configs)
     checkpoint_path = 'chkfile/checkpoint_mfwpn_england.chk'
 
@@ -170,7 +168,6 @@ if __name__ == '__main__':
     trainer.network.load_state_dict(net['net'])
     print('Model loaded successfully')
 
-    # Run inference
     elev = torch.tensor(ele)
     data = DataLoader(dataset_test, batch_size=configs.batch_size_test, shuffle=False)
 
@@ -178,3 +175,4 @@ if __name__ == '__main__':
     loss_u_test, loss_v_test = trainer.infer(dataset=dataset_test, dataloader=data, ele=elev)
 
     loss_test = loss_u_test + loss_v_test
+    print(f'\nTest Loss - U: {loss_u_test:.4f}, V: {loss_v_test:.4f}, Total: {loss_test:.4f}')

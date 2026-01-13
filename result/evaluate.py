@@ -65,7 +65,7 @@ rmse_results = weighted_rmse(y_pred_tensor, y_true_tensor)
 mae_results = weighted_mae(y_pred_tensor, y_true_tensor)
 acc_results = weighted_acc(y_pred_tensor, y_true_tensor)
 
-for i in range(24):
+for i in range(72):
     print(i+1)
     print('RMSE:', rmse_results[i])
     print('MAE: ', mae_results[i])
