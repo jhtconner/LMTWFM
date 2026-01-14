@@ -5,138 +5,58 @@ import numpy as np
 import copy
 import numbers
 from einops import rearrange
-from openstl.modules import (ConvSC, GASubBlock, VariableFusion)
-
-
-class TemporalPositionEncoding(nn.Module):
-    """
-    Learnable temporal position encoding for time-series forecasting.
-    Helps the model distinguish between different forecast horizons.
-    """
-
-    def __init__(self, channels=4, max_timesteps=96):
-        super().__init__()
-        # Learnable position embeddings for each timestep
-        self.pos_embed = nn.Parameter(torch.randn(1, max_timesteps, channels, 1, 1) * 0.02)
-
-    def forward(self, x):
-        """
-        Args:
-            x: (B, T, C, H, W) - input sequence
-        Returns:
-            x with added position information
-        """
-        B, T, C, H, W = x.shape
-        return x + self.pos_embed[:, :T, :C, :, :]
+from openstl.modules import (ConvSC, GASubBlock)
 
 
 class MFWPN_Model(nn.Module):
-    """
-    Multi-step MFWPN for medium-term (3-day) wind forecasting.
-
-    Changes from original MFWPN:
-    1. Added temporal position encoding
-    2. Temporal upsampling layer to expand from 24h to 72h
-    3. Support for variable forecast horizons
-    """
-
     def __init__(self, hid_S=2, hid_T=256, N_S=2, N_T=8, model_type='gsta',
                  mlp_ratio=8., drop=0.0, drop_path=0.0, spatio_kernel_enc=3,
-                 spatio_kernel_dec=3, act_inplace=True,
-                 input_hours=24, forecast_hours=72, **kwargs):
+                 spatio_kernel_dec=3, act_inplace=True, **kwargs):
         super(MFWPN_Model, self).__init__()
-
-        self.input_hours = input_hours  # T_in = 24
-        self.forecast_hours = forecast_hours  # T_out = 72 (3 days)
-        C, H, W = 4, 64, 80  # 4 channels: u, v, geopotential, temperature
-
+        T, C, H, W = 24, 2, 64, 80  # T is pre_seq_length
+        H, W = 64, 80
         act_inplace = False
-
-        # Temporal position encoding (NEW)
-        self.pos_encoding = TemporalPositionEncoding(
-            channels=C,
-            max_timesteps=max(input_hours, forecast_hours)
-        )
-
-        # Encoder (unchanged)
         self.enc = Encoder(spatio_kernel=spatio_kernel_enc, act_inplace=True)
-
-        # Decoder (unchanged)
         self.dec = Decoder(spatio_kernel=spatio_kernel_dec, act_inplace=True)
-
-        # Temporal processing networks (unchanged)
-        self.hid_w = MidMetaNet(input_hours * hid_S, hid_T, N_T,
-                                input_resolution=(64, 80), model_type=model_type,
+        self.hid_w = MidMetaNet(T*hid_S, hid_T, N_T, input_resolution=(64, 80), model_type=model_type,
+                                mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)    
+        self.hid_tz = MidMetaNet(T*hid_S, hid_T, N_T, input_resolution=(64, 80), model_type=model_type,
                                 mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
-        self.hid_tz = MidMetaNet(input_hours * hid_S, hid_T, N_T,
-                                 input_resolution=(64, 80), model_type=model_type,
-                                 mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
-
-        # Channel attention modules (unchanged)
-        self.channel_f = CAM(channel=input_hours * hid_S)
-        self.channel_i = CAM(channel=input_hours * hid_S)
+        self.channel_f = CAM(channel = 48)
+        self.channel_i = CAM(channel = 48) 
         self.gate = nn.Tanh()
-
-        # Elevation convolution (unchanged)
         self.ele_conv = nn.Sequential(
-            nn.Conv2d(input_hours, input_hours, kernel_size=3, stride=1, padding=1),
-            nn.Conv2d(input_hours, input_hours, kernel_size=1, stride=1))
-
-        # Variable fusion module (unchanged)
-        self.var_fusion = VariableFusion(channels=2)
-
-
-        # MC Dropout for uncertainty quantification (NEW)
-        self.dropout = nn.Dropout(p=0.1)
-
+            nn.Conv2d(48, 48, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(48, 48, kernel_size=1, stride=1))
+          
     def forward(self, x_raw, ele, **kwargs):
-        """
-        Forward pass with temporal upsampling.
-
-        Args:
-            x_raw: (B, T_in, C, H, W) - input sequence (24 hours)
-            ele: (H, W) - elevation data
-
-        Returns:
-            Y: (B, T_out, 2, H, W) - predicted wind (72 hours)
-        """
-        B, T, C, H, W = x_raw.shape  # T = input_hours (24)
-
-        # Add temporal position encoding (NEW)
-        x_raw = self.pos_encoding(x_raw)
-
-        # Prepare elevation
+        B, T, C, H, W = x_raw.shape
+        
         ele = ele[None, None, :, :]
         ele_h = ele
-        ele = ele.repeat(B * T, 1, 1, 1)
-
-        # Encode
-        x = x_raw.view(B * T, C, H, W)
+        ele = ele.repeat(B*T,1,1,1)
+        x = x_raw.view(B*T, C, H, W)  
         wcs, tzcs = self.enc(x, ele)
-
+        
         _, C_w, H_, W_ = wcs.shape
         _, C_tz, H_, W_ = tzcs.shape
 
-        # Reshape to temporal sequences
         w = wcs.view(B, T, C_w, H_, W_)
         tz = tzcs.view(B, T, C_tz, H_, W_)
 
-        # Process temporal features
-        hid_w = self.hid_w(w)
+        hid_w = self.hid_w(w)  
         hid_tz = self.hid_tz(tz)
-
-        hid_w = hid_w.reshape(B, T, C_w, H_, W_)
-        hid_upsampled = hid_w.repeat(1, 3, 1, 1, 1)[:, :self.forecast_hours]
-
-        hid_upsampled = self.dropout(hid_upsampled)
-
-        hid_upsampled = hid_upsampled.reshape(B * self.forecast_hours, C_w, H_, W_)
-        Y = self.dec(hid_upsampled)
-        Y = Y.reshape(B, self.forecast_hours, 2, H, W)
+        #ele_h = ele_h.repeat(B, 48, 1, 1)
+        ####time fusion
+        hid_w = hid_w * self.channel_f(hid_tz) + self.channel_i(hid_tz) * self.gate(hid_tz)  
+        hid_w = hid_w.reshape(B , T, C_w, H_, W_)
+        hid_w = hid_w.reshape(B * T, C_w, H_, W_)
+        
+        Y = self.dec(hid_w)      
+        Y = Y.reshape(B, T, 2, H, W)
 
         return Y
-
-
+    
 class SAM(nn.Module):
     def __init__(self, spatial_kernel=7):
         super(SAM, self).__init__()
@@ -144,60 +64,56 @@ class SAM(nn.Module):
         self.conv = nn.Conv2d(2, 1, kernel_size=spatial_kernel,
                               padding=spatial_kernel // 2, bias=False)
         self.sigmoid = nn.Sigmoid()
-
+        
     def forward(self, x):
         max_out, _ = torch.max(x, dim=1, keepdim=True)
-        avg_out = torch.mean(x, dim=1, keepdim=True)
+        avg_out = torch.mean(x, dim=1, keepdim=True)      
         spatial_out = self.sigmoid(self.conv(torch.cat([max_out, avg_out], dim=1)))
         return spatial_out
-
 
 class CAM(nn.Module):
     def __init__(self, channel, reduction=16):
         super(CAM, self).__init__()
-
+   
         self.max_pool = nn.AdaptiveMaxPool2d(1)
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.mlp = nn.Sequential(
-            nn.Conv2d(channel, max(1, channel // reduction), 1, bias=False),
+        self.mlp = nn.Sequential(       
+            # nn.Linear(channel, channel // reduction, bias=False)
+            nn.Conv2d(channel, channel // reduction, 1, bias=False),   
             nn.ReLU(inplace=True),
-            nn.Conv2d(max(1, channel // reduction), channel, 1, bias=False)
-        )
+            # nn.Linear(channel // reduction, channel,bias=False)
+            nn.Conv2d(channel // reduction, channel, 1, bias=False)
+        )        
         self.sigmoid = nn.Sigmoid()
-
+                                   
     def forward(self, x):
         max_out = self.mlp(self.max_pool(x))
         avg_out = self.mlp(self.avg_pool(x))
         eca = max_out + avg_out
-        channel_out = self.sigmoid(eca)
+        channel_out = self.sigmoid(eca)                           
         return channel_out
-
-
+                                  
 def sampling_generator(N, reverse=False):
     samplings = [False, True] * (N // 2)
-    if reverse:
-        return list(reversed(samplings[:N]))
-    else:
-        return samplings[:N]
-
+    if reverse: return list(reversed(samplings[:N]))
+    else: return samplings[:N]
 
 class Encoder(nn.Module):
     """3D Encoder for SimVP"""
-
     def __init__(self, spatio_kernel, act_inplace=True):
-        super(Encoder, self).__init__()
-
+        super(Encoder, self).__init__()  
+        
         self.wscale = nn.Parameter(torch.ones(2))
         self.tzscale = nn.Parameter(torch.ones(2))
-        ####Conv branch
-        self.wce = INN_all(num_layers=1)
+         ####Conv branch
+        self.wce =  INN_all(num_layers=1)
         self.tzce = INN_all(num_layers=1)
         ####Self-attention branch
         self.wse = TransformerBlock(2, num_heads=2, ffn_expansion_factor=2, bias=False,
-                                    LayerNorm_type='WithBias')
-
-        self.tzse = TransformerBlock(2, num_heads=2, ffn_expansion_factor=2, bias=False,
                                      LayerNorm_type='WithBias')
+        
+        self.tzse = TransformerBlock(2, num_heads=2, ffn_expansion_factor=2, bias=False,
+                                     LayerNorm_type='WithBias')   
         self.sa_f = SAM()
         self.sa_i = SAM()
         self.gate_1 = nn.Sigmoid()
@@ -206,12 +122,11 @@ class Encoder(nn.Module):
         self.ele_conv = nn.Sequential(
             nn.Conv2d(1, 2, kernel_size=3, stride=1, padding=1),
             nn.Conv2d(2, 2, kernel_size=1, stride=1))
-        self.var_fusion = VariableFusion(channels=2)
-
+        
     def forward(self, x, ele):
         w = x[:, 0:2]
         tz = x[:, 2:4]
-
+        
         wce_x = self.wce(w)
         wse_x = self.wse(w)
         wcs = wse_x * self.wscale[0] + wce_x * self.wscale[1]
@@ -220,38 +135,29 @@ class Encoder(nn.Module):
         tzse_x = self.tzse(tz)
         tzcs = tzse_x * self.tzscale[0] + tzce_x * self.tzscale[1]
         ####Fusion module
-        # ClimODE-style learned multivariate fusion
-        fused_w, fusion_weights = self.var_fusion([wcs, tzcs])
+        tz_gate_2 = self.gate_2(tzcs)
+        wcs = wcs * self.sa_f(tzcs) + self.sa_i(tzcs) * self.gate_2(tzcs) + wcs * self.gate_1(self.ele_conv(ele))
 
-        assert fused_w.shape == wcs.shape, \
-            f"Fusion shape mismatch: {fused_w.shape} vs {wcs.shape}"
-
-        # Elevation modulation (kept)
-        fused_w = fused_w + wcs * self.gate_1(self.ele_conv(ele))
-
-        return fused_w, tzcs
-
+        return wcs, tzcs
 
 class Decoder(nn.Module):
     """3D Encoder for SimVP"""
-
     def __init__(self, spatio_kernel, act_inplace=True):
         super(Decoder, self).__init__()
-
+        
         self.dwscale = nn.Parameter(torch.ones(2))
         ####Conv branch
-        self.dwce = INN_all(num_layers=1)
+        self.dwce =  INN_all(num_layers=1)                   
         ####Self-attention branch
         self.dwse = TransformerBlock(2, num_heads=2, ffn_expansion_factor=2, bias=False,
                                      LayerNorm_type='WithBias')
-
     def forward(self, wdcs):
+        
         dwse_x = self.dwse(wdcs)
         dwce_x = self.dwce(wdcs)
         dwcs = dwse_x * self.dwscale[0] + dwce_x * self.dwscale[1]
-
+        
         return dwcs
-
 
 class MetaBlock(nn.Module):
     """The hidden Translator of MetaFormer for SimVP"""
@@ -268,16 +174,14 @@ class MetaBlock(nn.Module):
                 drop=drop, drop_path=drop_path, act_layer=nn.GELU)
         else:
             assert False and "Invalid model_type in SimVP"
-
+            
         if in_channels != out_channels:
             self.reduction = nn.Conv2d(
                 in_channels, out_channels, kernel_size=1, stride=1, padding=0)
-
     def forward(self, x):
         z = self.block(x)
         return z if self.in_channels == self.out_channels else self.reduction(z)
-
-
+    
 class MidMetaNet(nn.Module):
     """The hidden Translator of MetaFormer for SimVP"""
 
@@ -294,23 +198,23 @@ class MidMetaNet(nn.Module):
             channel_in, channel_hid, input_resolution, model_type,
             mlp_ratio, drop, drop_path=dpr[0], layer_i=0)]
         # middle layers
-        for i in range(1, N2 - 1):
+        for i in range(1, N2-1):
             enc_layers.append(MetaBlock(
                 channel_hid, channel_hid, input_resolution, model_type,
                 mlp_ratio, drop, drop_path=dpr[i], layer_i=i))
         # upsample
         enc_layers.append(MetaBlock(
             channel_hid, channel_in, input_resolution, model_type,
-            mlp_ratio, drop, drop_path=drop_path, layer_i=N2 - 1))
+            mlp_ratio, drop, drop_path=drop_path, layer_i=N2-1)) 
         self.enc_1 = nn.Sequential(*enc_layers)
-
     def forward(self, x):
         B, T, C, H, W = x.shape
-        x = x.reshape(B, T * C, H, W)
+        x = x.reshape(B, T*C, H, W)
         z = x
         for i in range(self.N2):
             z = self.enc_1[i](z)
         return z
+
 
 
 class Attention(nn.Module):
@@ -319,16 +223,16 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1))
 
-        self.qkv = nn.Conv2d(dim, dim * 3, kernel_size=1, bias=bias)
+        self.qkv = nn.Conv2d(dim, dim*3, kernel_size=1, bias=bias)
         self.qkv_dwconv = nn.Conv2d(
-            dim * 3, dim * 3, kernel_size=3, stride=1, padding=1, groups=dim * 3, bias=bias)
+            dim*3, dim*3, kernel_size=3, stride=1, padding=1, groups=dim*3, bias=bias)
         self.project_out = nn.Conv2d(dim, dim, kernel_size=1, bias=bias)
 
     def forward(self, x):
         b, c, h, w = x.shape
         qkv = self.qkv_dwconv(self.qkv(x))
         q, k, v = qkv.chunk(3, dim=1)
-
+        
         q = rearrange(q, 'b (head c) h w -> b head c (h w)',
                       head=self.num_heads)
         k = rearrange(k, 'b (head c) h w -> b head c (h w)',
@@ -337,24 +241,22 @@ class Attention(nn.Module):
                       head=self.num_heads)
         q = torch.nn.functional.normalize(q, dim=-1)
         k = torch.nn.functional.normalize(k, dim=-1)
-
+        
         attn = (q @ k.transpose(-2, -1)) * self.temperature
         attn = attn.softmax(dim=-1)
         out = (attn @ v)
         out = rearrange(out, 'b head c (h w) -> b (head c) h w',
                         head=self.num_heads, h=h, w=w)
         out = self.project_out(out)
-        return out
+        return out 
 
 
 def to_3d(x):
     return rearrange(x, 'b c h w -> b (h w) c')
-
-
+    
 def to_4d(x, h, w):
     return rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
-
-
+    
 class BiasFree_LayerNorm(nn.Module):
     def __init__(self, normalized_shape):
         super(BiasFree_LayerNorm, self).__init__()
@@ -364,12 +266,11 @@ class BiasFree_LayerNorm(nn.Module):
         assert len(normalized_shape) == 1
         self.weight = nn.Parameter(torch.ones(normalized_shape))
         self.normalized_shape = normalized_shape
-
+        
     def forward(self, x):
         sigma = x.var(-1, keepdim=True, unbiased=False)
-        return x / torch.sqrt(sigma + 1e-5) * self.weight
-
-
+        return x / torch.sqrt(sigma+1e-5) * self.weight
+        
 class WithBias_LayerNorm(nn.Module):
     def __init__(self, normalized_shape):
         super(WithBias_LayerNorm, self).__init__()
@@ -380,11 +281,11 @@ class WithBias_LayerNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(normalized_shape))
         self.bias = nn.Parameter(torch.zeros(normalized_shape))
         self.normalized_shape = normalized_shape
-
+        
     def forward(self, x):
         mu = x.mean(-1, keepdim=True)
         sigma = x.var(-1, keepdim=True, unbiased=False)
-        return (x - mu) / torch.sqrt(sigma + 1e-5) * self.weight + self.bias
+        return (x - mu) / torch.sqrt(sigma+1e-5) * self.weight + self.bias
 
 
 class LayerNorm(nn.Module):
@@ -394,7 +295,6 @@ class LayerNorm(nn.Module):
             self.body = BiasFree_LayerNorm(dim)
         else:
             self.body = WithBias_LayerNorm(dim)
-
     def forward(self, x):
         h, w = x.shape[-2:]
         return to_4d(self.body(to_3d(x)), h, w)
@@ -404,16 +304,15 @@ class FeedForward(nn.Module):
     def __init__(self, dim, ffn_expansion_factor, bias):
         super(FeedForward, self).__init__()
 
-        hidden_features = int(dim * ffn_expansion_factor)
+        hidden_features = int(dim*ffn_expansion_factor)
 
         self.project_in = nn.Conv2d(
-            dim, hidden_features * 2, kernel_size=1, bias=bias)
+            dim, hidden_features*2, kernel_size=1, bias=bias)
 
-        self.dwconv = nn.Conv2d(hidden_features * 2, hidden_features * 2, kernel_size=3,
-                                stride=1, padding=1, groups=hidden_features * 2, bias=bias)
+        self.dwconv = nn.Conv2d(hidden_features*2, hidden_features*2, kernel_size=3,
+                                stride=1, padding=1, groups=hidden_features*2, bias=bias)
         self.project_out = nn.Conv2d(
             hidden_features, dim, kernel_size=1, bias=bias)
-
     def forward(self, x):
         x = self.project_in(x)
         x1, x2 = self.dwconv(x).chunk(2, dim=1)
@@ -429,12 +328,10 @@ class TransformerBlock(nn.Module):
         self.attn = Attention(dim, num_heads, bias)
         self.norm2 = LayerNorm(dim, LayerNorm_type)
         self.ffn = FeedForward(dim, ffn_expansion_factor, bias)
-
     def forward(self, x):
         x = x + self.attn(self.norm1(x))
         x = x + self.ffn(self.norm2(x))
         return x
-
 
 class INN(nn.Module):
     def __init__(self, input, output, ratio):
@@ -448,10 +345,8 @@ class INN(nn.Module):
             nn.Conv2d(hidden_dim, output, 1, bias=False),
             nn.BatchNorm2d(output),
         )
-
     def forward(self, x):
         return self.bottleneckBlock(x)
-
 
 class Feature(nn.Module):
     def __init__(self):
@@ -459,30 +354,30 @@ class Feature(nn.Module):
 
         self.phi = INN(input=32, output=32, ratio=2)
         self.seta = INN(input=32, output=32, ratio=2)
-
+        
     def forward(self, f1, f2):
         f2 = f2 + self.phi(f1)
         f1 = f1 + self.seta(f2)
         return f1, f2
-
 
 class INN_all(nn.Module):
     def __init__(self, num_layers=None):
         super(INN_all, self).__init__()
         INN_layers = [Feature() for _ in range(num_layers)]
         self.net = nn.Sequential(*INN_layers)
-
+        
         self.shffle = nn.Conv2d(2, 64, kernel_size=3, stride=1, padding=1)
         self.fusion = nn.Conv2d(64, 2, kernel_size=3, stride=1, padding=1)
-
+        
     def separate(self, x):
-        f1, f2 = x[:, :x.shape[1] // 2], x[:, x.shape[1] // 2:x.shape[1]]
+        f1, f2 = x[:, :x.shape[1]//2], x[:, x.shape[1]//2:x.shape[1]]
         return f1, f2
-
+    
     def forward(self, x):
         f1, f2 = self.separate(self.shffle(x))
-
-        for layer in self.net:
+        
+        for layer in self.net: 
             f1, f2 = layer(f1, f2)
         f_out = self.fusion(torch.cat((f1, f2), dim=1))
         return f_out
+

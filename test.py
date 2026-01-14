@@ -10,7 +10,7 @@ from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
 import zipfile
 import torchvision.models as models
-from openstl.models.mfwpn import MFWPN_Model
+from openstl.models.LMTWFM import LMTWFM_Model
 import torch
 import torch.nn as nn
 from config import configs
@@ -54,7 +54,7 @@ class Trainer:
         self.configs = configs
         self.device = configs.device
         torch.manual_seed(35)
-        self.network = MFWPN_Model(input_hours=24, forecast_hours=72).to(configs.device)
+        self.network = LMTWFM_Model(input_hours=24, forecast_hours=72).to(configs.device)
         adam = torch.optim.Adam([{'params': self.network.parameters()}], lr=0, weight_decay=configs.weight_decay)
         factor = math.sqrt(configs.d_model*configs.warmup)*0.001
         self.opt = NoamOpt(configs.d_model, factor, warmup=configs.warmup, optimizer=adam)
@@ -143,17 +143,17 @@ if __name__ == '__main__':
 
     print('\nLoading England test data...')
     dataset_test = dataset_package(
-        "mfwpn_data_england/npy_files/test_wind.npy",
-        "mfwpn_data_england/npy_files/test_pressure.npy"
+        "lmtwfm_data/npy_files/test_wind.npy",
+        "lmtwfm_data/npy_files/test_pressure.npy"
     )
     print('Dataset_test Shape:\n', dataset_test.GetDataShape())
 
-    ele = np.load('mfwpn_data_england/npy_files/elevation.npy').astype(np.float32)
+    ele = np.load('lmtwfm_data/npy_files/elevation.npy').astype(np.float32)
     ele[ele < 0] = 0
     ele = (ele - ele.mean()) / ele.std()
 
     trainer = Trainer(configs)
-    checkpoint_path = 'chkfile/checkpoint_mfwpn_england.chk'
+    checkpoint_path = 'chkfile/checkpoint_lmtwfm.chk'
 
     if not os.path.exists(checkpoint_path):
         print(f'\nERROR: Checkpoint not found at {checkpoint_path}')

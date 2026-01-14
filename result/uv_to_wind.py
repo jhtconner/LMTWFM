@@ -1,7 +1,7 @@
 import numpy as np
 
 # ENGLAND NORMALIZATION PARAMETERS
-# Calculated from: mfwpn_data_england/npy_files/train_wind.npy
+# Calculated from: lmtwfm_data/npy_files/train_wind.npy
 u_mean = 0.06038649380207062
 u_std = 1.0029470920562744
 v_mean = -0.062388960272073746
