@@ -24,7 +24,7 @@ pip install -r requirements.txt
 ## Overview
 
 - `data/:` contains a test set for the northeast region of the manuscript, which can be downloaded via the link .
-- `openstl/models/mfwpn.py:` contains the network architecture of this LMTWFM.
+- `openstl/models/LMTWFM.py:` contains the network architecture of LMTWFM.
 - `openstl/modules/:` contains partial modules of the LMTWFM.
 - `utils/:` contains data processing files and loss calculations..
 - `chkfile/:` contains weights for predicting 24-hour wind speeds in local region of your choice, all results from model are from England.
