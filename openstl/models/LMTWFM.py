@@ -56,13 +56,13 @@ class LMTWFM_Model(nn.Module):
             max_timesteps=max(input_hours, forecast_hours)
         )
 
-        # Encoder (unchanged)
+        # Encoder
         self.enc = Encoder(spatio_kernel=spatio_kernel_enc, act_inplace=True)
 
-        # Decoder (unchanged)
+        # Decoder
         self.dec = Decoder(spatio_kernel=spatio_kernel_dec, act_inplace=True)
 
-        # Temporal processing networks (unchanged)
+        # Temporal processing networks
         self.hid_w = MidMetaNet(input_hours * hid_S, hid_T, N_T,
                                 input_resolution=(64, 80), model_type=model_type,
                                 mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
@@ -70,21 +70,20 @@ class LMTWFM_Model(nn.Module):
                                  input_resolution=(64, 80), model_type=model_type,
                                  mlp_ratio=mlp_ratio, drop=drop, drop_path=drop_path)
 
-        # Channel attention modules (unchanged)
+        # Channel attention modules
         self.channel_f = CAM(channel=input_hours * hid_S)
         self.channel_i = CAM(channel=input_hours * hid_S)
         self.gate = nn.Tanh()
 
-        # Elevation convolution (unchanged)
+        # Elevation convolution
         self.ele_conv = nn.Sequential(
             nn.Conv2d(input_hours, input_hours, kernel_size=3, stride=1, padding=1),
             nn.Conv2d(input_hours, input_hours, kernel_size=1, stride=1))
 
-        # Variable fusion module (unchanged)
+        # Variable fusion module
         self.var_fusion = VariableFusion(channels=2)
 
-
-        # MC Dropout for uncertainty quantification (NEW)
+        # MC Dropout for uncertainty quantification
         self.dropout = nn.Dropout(p=0.1)
 
     def forward(self, x_raw, ele, **kwargs):
@@ -120,13 +119,27 @@ class LMTWFM_Model(nn.Module):
         tz = tzcs.view(B, T, C_tz, H_, W_)
 
         # Process temporal features
+        # Process temporal features
         hid_w = self.hid_w(w)
         hid_tz = self.hid_tz(tz)
 
-        hid_w = hid_w.reshape(B, T, C_w, H_, W_)
-        hid_upsampled = hid_w.repeat(1, 3, 1, 1, 1)[:, :self.forecast_hours]
+        hid_w = hid_w * self.channel_f(hid_tz) + self.channel_i(hid_tz) * self.gate(hid_tz)
 
-        hid_upsampled = self.dropout(hid_upsampled)
+        hid_w = hid_w.reshape(B, T, C_w, H_, W_)
+
+        hid_w_perm = hid_w.permute(0, 2, 1, 3, 4)
+        hid_upsampled = F.interpolate(
+            hid_w_perm,
+            size=(self.forecast_hours, H_, W_),
+            mode='trilinear',
+            align_corners=False
+        )
+        hid_upsampled = hid_upsampled.permute(0, 2, 1, 3, 4)
+
+        hid_upsampled = self.pos_encoding(hid_upsampled)
+
+        if self.training:
+            hid_upsampled = self.dropout(hid_upsampled)
 
         hid_upsampled = hid_upsampled.reshape(B * self.forecast_hours, C_w, H_, W_)
         Y = self.dec(hid_upsampled)

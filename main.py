@@ -274,7 +274,7 @@ if __name__ == '__main__':
     print('Dataset_train Shape:\n', dataset_train.GetDataShape())
     print('Dataset_val Shape:\n', dataset_val.GetDataShape())
 
-    ele = np.load('LMTWFM_data_england/npy_files/elevation.npy').astype(np.float32)
+    ele = np.load('LMTWFM_data/npy_files/elevation.npy').astype(np.float32)
     ele[ele < 0] = 0
     ele = (ele - ele.mean()) / ele.std()
 
